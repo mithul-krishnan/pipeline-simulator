@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Easy Pipeline Simulator (Hazards & Stalls)</title>
+  <style>
+    :root{
+      --bg:#f4f4f9;
+      --cell:#ffffff;
+      --grid:#d7d7d7;
+      --label:#2e2e2e;
+      --primary:#3498db;
+      --hazard:#e74c3c;
+      --stall:#95a5a6;
+      --text:#222;
+    }
+    body{
+      margin:0;
+      font-family: system-ui, Segoe UI, Arial, sans-serif;
+      background:var(--bg);
+      color:var(--text);
+      padding:22px;
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      gap:14px;
+    }
+    h1{ margin:0; font-size:32px; }
+    .controls{ display:flex; gap:10px; }
+    button{
+      padding:10px 18px;
+      font-size:15px;
+      cursor:pointer;
+      background:var(--primary);
+      color:#fff;
+      border:0;
+      border-radius:6px;
+    }
+    button:disabled{ opacity:0.55; cursor:not-allowed; }
+    .wrap{
+      width:min(1000px, 98vw);
+      background:#fff;
+      border:1px solid #e6e6e6;
+      border-radius:10px;
+      padding:14px;
+      box-shadow:0 8px 30px rgba(0,0,0,.06);
+    }
+    .sub{
+      display:flex;
+      justify-content:space-between;
+      align-items:flex-start;
+      gap:12px;
+      flex-wrap:wrap;
+      margin-bottom:12px;
+      font-size:14px;
+    }
+    .legend{
+      display:flex;
+      gap:14px;
+      flex-wrap:wrap;
+      align-items:center;
+    }
+    .li{ display:flex; gap:6px; align-items:center; }
+    .box{ width:14px; height:14px; border:1px solid #333; }
+    .b0{ background:#2980b9; }
+    .b1{ background:#27ae60; }
+    .b2{ background:#8e44ad; }
+    .bh{ background:#fadbd8; border-color:var(--hazard); }
+    .bs{ background:#ecf0f1; border-color:#bfc6c9; }
+
+    /* Grid */
+    .grid{
+      display:grid;
+      grid-template-columns: 70px repeat(15, 62px);
+      gap:2px;
+      background:var(--grid);
+      padding:2px;
+      border-radius:8px;
+      overflow-x:auto;
+    }
+    .stage{
+      background:var(--label);
+      color:#fff;
+      display:flex;
+      justify-content:center;
+      align-items:center;
+      font-weight:700;
+      font-size:12px;
+      user-select:none;
+    }
+    .cycle{
+      background:#efefef;
+      color:#666;
+      display:flex;
+      justify-content:center;
+      align-items:center;
+      font-size:11px;
+      user-select:none;
+    }
+    .cell{
+      background:var(--cell);
+      height:40px;
+      display:flex;
+      justify-content:center;
+      align-items:center;
+      font-size:11px;
+      font-weight:700;
+      border-radius:4px;
+      user-select:none;
+    }
+    .inst-0{ color:#2980b9; }
+    .inst-1{ color:#27ae60; }
+    .inst-2{ color:#8e44ad; }
+
+    .hazard{
+      background:#fadbd8;
+      outline:2px solid var(--hazard);
+      color:var(--hazard) !important;
+    }
+    .stall{
+      background:#ecf0f1;
+      color:var(--stall);
+      font-style:italic;
+    }
+
+    #log{
+      margin-top:12px;
+      height:160px;
+      overflow:auto;
+      border:1px solid #e1e1e1;
+      border-radius:8px;
+      padding:10px;
+      background:#fff;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size:12.5px;
+    }
+    .logEntry{ padding:4px 0; border-bottom:1px solid #f0f0f0; }
+    .logHaz{ color:var(--hazard); font-weight:800; }
+    .logStall{ color:var(--stall); font-weight:800; }
+    .hint{
+      color:#555;
+      line-height:1.35;
+      max-width: 720px;
+      font-size:14px;
+    }
+    code{ background:#f3f3f3; padding:1px 6px; border-radius:6px; }
+  </style>
+</head>
+<body>
+
+  <h1>Pipeline Simulator</h1>
+
+  <div class="controls">
+    <button id="btn-step" onclick="step()">Step Forward</button>
+    <button id="btn-auto" onclick="toggleAuto()">Auto Play</button>
+    <button onclick="resetSim()">Reset</button>
+  </div>
+
+  <div class="wrap">
+    <div class="sub">
+      <div class="hint">
+        Demo: <code>I1: ADD R1,R2,R3</code> → produces <code>R1</code><br/>
+        <code>I2: SUB R4,R1,R5</code> and <code>I3: AND R6,R1,R7</code> need <code>R1</code><br/>
+        No forwarding → CPU stalls until ADD writes back (WB).
+      </div>
+      <div class="legend">
+        <div class="li"><div class="box b0"></div> I1 (ADD)</div>
+        <div class="li"><div class="box b1"></div> I2 (SUB)</div>
+        <div class="li"><div class="box b2"></div> I3 (AND)</div>
+        <div class="li"><div class="box bh"></div> Hazard</div>
+        <div class="li"><div class="box bs"></div> Stall / NOP</div>
+      </div>
+    </div>
+
+    <div class="grid" id="grid"></div>
+    <div id="log"></div>
+  </div>
+
+<script>
+  // ----------------------------
+  // CONFIG
+  // ----------------------------
+  const STAGES = ["IF","ID","EX","MEM","WB"];
+  const MAX_CYCLES = 15;
+
+  // 3 instructions for easy demo
+  const instructions = [
+    { id:0, op:"ADD", dest:"R1", src1:"R2", src2:"R3" },
+    { id:1, op:"SUB", dest:"R4", src1:"R1", src2:"R5" },
+    { id:2, op:"AND", dest:"R6", src1:"R1", src2:"R7" },
+  ];
+
+  // ----------------------------
+  // STATE
+  // ----------------------------
+  let cycle = 0;
+  let pc = 0;                    // next instruction index to fetch
+  let running = false;
+  let timer = null;
+
+  // stageState[s] = instructionId | null
+  let stageState = Array(STAGES.length).fill(null);
+
+  // timeline[s][c] = { kind: "inst", id } OR { kind:"nop" } OR null
+  let timeline = Array(STAGES.length).fill(null).map(()=>Array(MAX_CYCLES).fill(null));
+
+  // ----------------------------
+  // UI
+  // ----------------------------
+  function initGrid(){
+    const grid = document.getElementById("grid");
+    grid.innerHTML = "";
+
+    const corner = document.createElement("div");
+    corner.className = "stage";
+    corner.innerText = "Stage";
+    grid.appendChild(corner);
+
+    for(let c=0;c<MAX_CYCLES;c++){
+      const lbl = document.createElement("div");
+      lbl.className = "cycle";
+      lbl.innerText = c+1;
+      grid.appendChild(lbl);
+    }
+
+    for(let s=0;s<STAGES.length;s++){
+      const st = document.createElement("div");
+      st.className = "stage";
+      st.innerText = STAGES[s];
+      grid.appendChild(st);
+
+      for(let c=0;c<MAX_CYCLES;c++){
+        const cell = document.createElement("div");
+        cell.className = "cell";
+        cell.id = `cell-${s}-${c}`;
+        grid.appendChild(cell);
+      }
+    }
+  }
+
+  function pushLog(msg, type="normal"){
+    const log = document.getElementById("log");
+    const d = document.createElement("div");
+    d.className = "logEntry";
+    if(type==="hazard") d.classList.add("logHaz");
+    if(type==="stall") d.classList.add("logStall");
+    d.textContent = `Cycle ${cycle+1}: ${msg}`;
+    log.prepend(d);
+  }
+
+  function render(){
+    // clear
+    document.querySelectorAll(".cell").forEach(el=>{
+      el.className = "cell";
+      el.textContent = "";
+    });
+
+    for(let s=0;s<STAGES.length;s++){
+      for(let c=0;c<MAX_CYCLES;c++){
+        const cell = document.getElementById(`cell-${s}-${c}`);
+        const slot = timeline[s][c];
+        if(!slot) continue;
+
+        if(slot.kind === "nop"){
+          cell.classList.add("stall");
+          cell.textContent = "NOP";
+          continue;
+        }
+
+        const inst = instructions[slot.id];
+        cell.textContent = `${inst.op} ${inst.dest}`;
+        cell.classList.add(`inst-${inst.id}`);
+
+        // hazard highlight for ID stage in that cycle
+        if(s === 1){
+          if(isHazardAtCycle(c)){
+            cell.classList.add("hazard");
+          }
+        }
+      }
+    }
+  }
+
+  // compute hazard from recorded timeline at cycle c (ID reads older writers in EX/MEM/WB)
+  function isHazardAtCycle(c){
+    const idSlot = timeline[1][c];
+    if(!idSlot || idSlot.kind !== "inst") return false;
+
+    const idInst = instructions[idSlot.id];
+    const reads = [idInst.src1, idInst.src2].filter(Boolean);
+
+    const olderSlots = [timeline[2][c], timeline[3][c], timeline[4][c]].filter(x=>x && x.kind==="inst");
+    for(const os of olderSlots){
+      const prod = instructions[os.id];
+      if(prod.dest && reads.includes(prod.dest)) return true;
+    }
+    return false;
+  }
+
+  // ----------------------------
+  // HAZARD DETECTION (live)
+  // RAW hazard in ID with older instructions in EX/MEM/WB
+  // no forwarding: must stall until producer leaves WB
+  // ----------------------------
+  function hasRAW_Hazard(){
+    const idId = stageState[1];
+    if(idId === null) return false;
+
+    const idInst = instructions[idId];
+    const reads = [idInst.src1, idInst.src2].filter(Boolean);
+
+    const older = [stageState[2], stageState[3], stageState[4]].filter(x=>x!==null);
+    for(const oid of older){
+      const prod = instructions[oid];
+      if(prod.dest && reads.includes(prod.dest)) return true;
+    }
+    return false;
+  }
+
+  // ----------------------------
+  // SIM STEP (one cycle)
+  // ----------------------------
+  function step(){
+    if(cycle >= MAX_CYCLES){
+      stopAuto();
+      return;
+    }
+
+    // 1) Record current pipeline occupancy into timeline
+    for(let s=0;s<STAGES.length;s++){
+      if(stageState[s] === null){
+        timeline[s][cycle] = null;
+      } else {
+        timeline[s][cycle] = { kind:"inst", id: stageState[s] };
+      }
+    }
+
+    // 2) Decide stall (hazard checked in ID)
+    const stall = hasRAW_Hazard();
+    if(stall){
+      pushLog("RAW hazard in ID → stall: freeze IF/ID + insert NOP in EX", "stall");
+    } else {
+      pushLog("No hazard → advance normally");
+    }
+
+    // 3) Build next stage state
+    const next = Array(STAGES.length).fill(null);
+
+    // WB <= MEM, MEM <= EX always advance
+    next[4] = stageState[3];
+    next[3] = stageState[2];
+
+    if(stall){
+      // EX gets a bubble (NOP)
+      next[2] = null;             // bubble
+      next[1] = stageState[1];    // freeze ID
+      next[0] = stageState[0];    // freeze IF
+
+      // Also show NOP in timeline for EX at NEXT cycle (visual clarity)
+      if(cycle + 1 < MAX_CYCLES){
+        // only set if empty later; render will show this bubble
+        // we mark it now for clearer demo
+        timeline[2][cycle + 1] = { kind:"nop" };
+      }
+    } else {
+      // Normal advance
+      next[2] = stageState[1];    // ID -> EX
+      next[1] = stageState[0];    // IF -> ID
+
+      // Fetch new into IF
+      if(pc < instructions.length){
+        next[0] = pc;
+        pc++;
+      } else {
+        next[0] = null;
+      }
+    }
+
+    // 4) Commit and render
+    stageState = next;
+    render();
+
+    // 5) Next cycle
+    cycle++;
+
+    // stop if everything done
+    const empty = stageState.every(x=>x===null);
+    if(empty && pc >= instructions.length) stopAuto();
+  }
+
+  // ----------------------------
+  // CONTROL
+  // ----------------------------
+  function toggleAuto(){
+    if(running){
+      stopAuto();
+      return;
+    }
+    running = true;
+    document.getElementById("btn-auto").innerText = "Pause";
+    timer = setInterval(step, 700);
+  }
+
+  function stopAuto(){
+    running = false;
+    clearInterval(timer);
+    timer = null;
+    document.getElementById("btn-auto").innerText = "Auto Play";
+  }
+
+  function resetSim(){
+    stopAuto();
+    cycle = 0;
+    pc = 0;
+    stageState = Array(STAGES.length).fill(null);
+    timeline = Array(STAGES.length).fill(null).map(()=>Array(MAX_CYCLES).fill(null));
+    document.getElementById("log").innerHTML = "";
+    render();
+  }
+
+  // ----------------------------
+  // START
+  // ----------------------------
+  initGrid();
+  render();
+</script>
+</body>
+</html>
